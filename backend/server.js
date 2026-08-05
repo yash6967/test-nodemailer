@@ -33,18 +33,34 @@ app.use(express.json());
 
 // Helper function to create Nodemailer Transporter
 function createTransporter() {
+  const user = process.env.SMTP_USER;
+  const pass = process.env.SMTP_PASS;
+
+  // Method 1: Gmail OAuth2 Authentication (Recommended for Gmail on Render/Cloud Hosts)
+  if (process.env.GMAIL_CLIENT_ID && process.env.GMAIL_REFRESH_TOKEN) {
+    console.log('[Transporter] Initializing Nodemailer with Gmail OAuth2...');
+    return nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        type: 'OAuth2',
+        user: user,
+        clientId: process.env.GMAIL_CLIENT_ID,
+        clientSecret: process.env.GMAIL_CLIENT_SECRET,
+        refreshToken: process.env.GMAIL_REFRESH_TOKEN
+      }
+    });
+  }
+
   const service = process.env.SMTP_SERVICE; // e.g. 'gmail'
   const host = process.env.SMTP_HOST || 'smtp.gmail.com';
   const port = parseInt(process.env.SMTP_PORT || '465', 10);
   const secure = process.env.SMTP_SECURE === 'true' || port === 465;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
 
-  if (!user || !pass) {
-    throw new Error('SMTP credentials missing! Please check your backend Environment Variables (SMTP_USER, SMTP_PASS).');
+  if (!user || (!pass && !service)) {
+    throw new Error('SMTP credentials missing! Please check your backend Environment Variables.');
   }
 
-  // Option A: If SMTP_SERVICE is set (e.g. SMTP_SERVICE=gmail)
+  // Method 2: Standard SMTP Service or Host/Port
   if (service) {
     return nodemailer.createTransport({
       service: service,
@@ -61,11 +77,11 @@ function createTransporter() {
     });
   }
 
-  // Option B: Standard SMTP Host & Port configuration
+  // Method 3: Standard SMTP Host & Port configuration
   return nodemailer.createTransport({
     host: host,
     port: port,
-    secure: secure, // true for 465 (SSL), false for 587 (STARTTLS)
+    secure: secure,
     auth: {
       user: user,
       pass: pass
