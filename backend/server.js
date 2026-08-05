@@ -136,7 +136,12 @@ app.post('/api/verify-smtp', async (req, res) => {
     if (configUsed.hasBrevoKey) {
       const apiKey = process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.SMTP_PASS;
       const apiRes = await fetch('https://api.brevo.com/v3/account', {
-        headers: { 'api-key': apiKey }
+        method: 'GET',
+        headers: {
+          'accept': 'application/json',
+          'api-key': apiKey.trim(),
+          'content-type': 'application/json'
+        }
       });
       if (apiRes.ok) {
         const accountData = await apiRes.json();
@@ -148,12 +153,36 @@ app.post('/api/verify-smtp', async (req, res) => {
         });
       } else {
         const errData = await apiRes.json();
-        return res.status(apiRes.status).json({
-          success: false,
-          message: 'Brevo API Key verification failed. Please check your BREVO_API_KEY in Render.',
-          configUsed,
-          error: errData
-        });
+        console.error('[Brevo Verify Error Response]:', errData);
+
+        // Fallback: Test via Nodemailer SMTP Relay to Brevo (smtp-relay.brevo.com:587)
+        try {
+          const transporter = nodemailer.createTransport({
+            host: 'smtp-relay.brevo.com',
+            port: 587,
+            secure: false,
+            auth: {
+              user: process.env.SMTP_USER || process.env.FROM_EMAIL,
+              pass: apiKey.trim()
+            },
+            tls: { rejectUnauthorized: false }
+          });
+          await transporter.verify();
+          return res.status(200).json({
+            success: true,
+            message: 'Brevo SMTP Relay verified successfully via Nodemailer (smtp-relay.brevo.com)! Ready to send emails.',
+            configUsed,
+            timestamp: new Date().toISOString()
+          });
+        } catch (smtpErr) {
+          return res.status(apiRes.status).json({
+            success: false,
+            message: 'Brevo API Key & SMTP Relay verification failed. Check account activation or IP restrictions in Brevo.',
+            configUsed,
+            apiError: errData,
+            smtpError: smtpErr.message
+          });
+        }
       }
     }
 
@@ -220,15 +249,16 @@ app.post('/api/send-email', async (req, res) => {
   // Method A1: Brevo HTTPS API Delivery (300 free emails/day to ANY recipient without domain verification!)
   if (configUsed.hasBrevoKey) {
     try {
-      const apiKey = process.env.BREVO_API_KEY || process.env.SMTP_PASS;
-      const senderEmail = process.env.FROM_EMAIL || process.env.SMTP_USER;
+      const apiKey = (process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.SMTP_PASS).trim();
+      const senderEmail = (process.env.FROM_EMAIL || process.env.SMTP_USER || '').trim();
 
       console.log(`[Brevo HTTPS Send] To: ${to} | From: ${senderEmail}`);
       const response = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',
         headers: {
+          'accept': 'application/json',
           'api-key': apiKey,
-          'Content-Type': 'application/json'
+          'content-type': 'application/json'
         },
         body: JSON.stringify({
           sender: { name: 'MERN Mailer Tester', email: senderEmail },
