@@ -56,8 +56,14 @@ function createTransporter() {
   const port = parseInt(process.env.SMTP_PORT || '465', 10);
   const secure = process.env.SMTP_SECURE === 'true' || port === 465;
 
-  if (!user || (!pass && !service)) {
-    throw new Error('SMTP credentials missing! Please check your backend Environment Variables.');
+  const hasApiKey = !!(process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.RESEND_API_KEY);
+
+  if (!user && !hasApiKey) {
+    throw new Error('SMTP_USER missing! Please check your backend Environment Variables in Render.');
+  }
+
+  if (!pass && !service && !hasApiKey) {
+    throw new Error('SMTP credentials missing! Set BREVO_API_KEY or SMTP_PASS in your Render Environment Variables.');
   }
 
   // Method 2: Standard SMTP Service or Host/Port
@@ -105,8 +111,9 @@ app.get('/api/health', (req, res) => {
       smtp_port: process.env.SMTP_PORT || 'Not configured',
       smtp_secure: process.env.SMTP_SECURE || 'Not configured',
       smtp_user_set: !!process.env.SMTP_USER,
-      smtp_pass_set: !!process.env.SMTP_PASS,
-      from_email: process.env.FROM_EMAIL || 'Not configured'
+      smtp_pass_set: !!(process.env.SMTP_PASS || process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.RESEND_API_KEY),
+      from_email: process.env.FROM_EMAIL || 'Not configured',
+      has_brevo_key: !!(process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY)
     }
   });
 });
@@ -117,13 +124,39 @@ app.post('/api/verify-smtp', async (req, res) => {
     host: process.env.SMTP_HOST || 'smtp.gmail.com (default)',
     port: process.env.SMTP_PORT || '465 (default)',
     secure: process.env.SMTP_SECURE || 'false',
-    user: process.env.SMTP_USER || 'Not set',
+    user: process.env.SMTP_USER || process.env.FROM_EMAIL || 'Not set',
     service: process.env.SMTP_SERVICE || 'Not set',
     hasOAuth: !!(process.env.GMAIL_CLIENT_ID && process.env.GMAIL_REFRESH_TOKEN),
-    hasResendKey: !!(process.env.RESEND_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('re_')))
+    hasResendKey: !!(process.env.RESEND_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('re_'))),
+    hasBrevoKey: !!(process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('xkeysib-')))
   };
 
   try {
+    // If using Brevo API Key over HTTPS (Port 443 - 100% open on Render)
+    if (configUsed.hasBrevoKey) {
+      const apiKey = process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.SMTP_PASS;
+      const apiRes = await fetch('https://api.brevo.com/v3/account', {
+        headers: { 'api-key': apiKey }
+      });
+      if (apiRes.ok) {
+        const accountData = await apiRes.json();
+        return res.status(200).json({
+          success: true,
+          message: `Brevo API Key verified successfully over HTTPS (Port 443)! Connected account: ${accountData.email}. Ready to send emails.`,
+          configUsed,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        const errData = await apiRes.json();
+        return res.status(apiRes.status).json({
+          success: false,
+          message: 'Brevo API Key verification failed. Please check your BREVO_API_KEY in Render.',
+          configUsed,
+          error: errData
+        });
+      }
+    }
+
     // If using Resend API Key over HTTPS (Port 443 - 100% open on Render)
     if (configUsed.hasResendKey) {
       const apiKey = process.env.RESEND_API_KEY || process.env.SMTP_PASS;
