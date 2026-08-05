@@ -120,50 +120,79 @@ app.get('/api/health', (req, res) => {
 
 // Endpoint 1: Verify SMTP Connection without sending mail
 app.post('/api/verify-smtp', async (req, res) => {
+  const brevoKey = (process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.SMTP_PASS || '').trim();
+  const resendKey = (process.env.RESEND_API_KEY || '').trim();
+
   const configUsed = {
     host: process.env.SMTP_HOST || 'smtp.gmail.com (default)',
     port: process.env.SMTP_PORT || '465 (default)',
-    secure: process.env.SMTP_SECURE || 'false',
     user: process.env.SMTP_USER || process.env.FROM_EMAIL || 'Not set',
     service: process.env.SMTP_SERVICE || 'Not set',
     hasOAuth: !!(process.env.GMAIL_CLIENT_ID && process.env.GMAIL_REFRESH_TOKEN),
-    hasResendKey: !!(process.env.RESEND_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('re_'))),
-    hasBrevoKey: !!(process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('xkeysib-')))
+    hasResendKey: !!resendKey,
+    hasBrevoKey: !!brevoKey,
+    keyPrefix: brevoKey ? brevoKey.substring(0, 8) : 'none'
   };
 
   try {
-    // If using Brevo API Key over HTTPS (Port 443 - 100% open on Render)
-    if (configUsed.hasBrevoKey) {
-      const apiKey = process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.SMTP_PASS;
-      const apiRes = await fetch('https://api.brevo.com/v3/account', {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'api-key': apiKey.trim(),
-          'content-type': 'application/json'
-        }
-      });
-      if (apiRes.ok) {
-        const accountData = await apiRes.json();
-        return res.status(200).json({
-          success: true,
-          message: `Brevo API Key verified successfully over HTTPS (Port 443)! Connected account: ${accountData.email}. Ready to send emails.`,
-          configUsed,
-          timestamp: new Date().toISOString()
-        });
-      } else {
-        const errData = await apiRes.json();
-        console.error('[Brevo Verify Error Response]:', errData);
-
-        // Fallback: Test via Nodemailer SMTP Relay to Brevo (smtp-relay.brevo.com:587)
+    // If using Brevo Key
+    if (brevoKey) {
+      // Step A: If key starts with xsmtpsib- (SMTP Relay Key), test with Nodemailer directly
+      if (brevoKey.startsWith('xsmtpsib-')) {
         try {
           const transporter = nodemailer.createTransport({
             host: 'smtp-relay.brevo.com',
             port: 587,
             secure: false,
             auth: {
-              user: process.env.SMTP_USER || process.env.FROM_EMAIL,
-              pass: apiKey.trim()
+              user: process.env.FROM_EMAIL || process.env.SMTP_USER,
+              pass: brevoKey
+            },
+            tls: { rejectUnauthorized: false }
+          });
+          await transporter.verify();
+          return res.status(200).json({
+            success: true,
+            message: 'Brevo SMTP Relay Key (xsmtpsib-) verified successfully via Nodemailer (smtp-relay.brevo.com)! Ready to send emails.',
+            configUsed,
+            timestamp: new Date().toISOString()
+          });
+        } catch (smtpErr) {
+          console.error('[Brevo SMTP Verify Error]:', smtpErr);
+        }
+      }
+
+      // Step B: Test as HTTP API Key (xkeysib-)
+      const apiRes = await fetch('https://api.brevo.com/v3/account', {
+        method: 'GET',
+        headers: {
+          'accept': 'application/json',
+          'api-key': brevoKey,
+          'content-type': 'application/json'
+        }
+      });
+
+      if (apiRes.ok) {
+        const accountData = await apiRes.json();
+        return res.status(200).json({
+          success: true,
+          message: `Brevo API Key (xkeysib-) verified successfully over HTTPS! Connected account: ${accountData.email}. Ready to send emails.`,
+          configUsed,
+          timestamp: new Date().toISOString()
+        });
+      } else {
+        const errData = await apiRes.json();
+        console.error('[Brevo API Verify Error]:', errData);
+
+        // Fallback: Test via Nodemailer SMTP Relay
+        try {
+          const transporter = nodemailer.createTransport({
+            host: 'smtp-relay.brevo.com',
+            port: 587,
+            secure: false,
+            auth: {
+              user: process.env.FROM_EMAIL || process.env.SMTP_USER,
+              pass: brevoKey
             },
             tls: { rejectUnauthorized: false }
           });
@@ -177,7 +206,7 @@ app.post('/api/verify-smtp', async (req, res) => {
         } catch (smtpErr) {
           return res.status(apiRes.status).json({
             success: false,
-            message: 'Brevo API Key & SMTP Relay verification failed. Check account activation or IP restrictions in Brevo.',
+            message: 'Brevo Key verification failed. If your key starts with xsmtpsib-, it is an SMTP Key. Make sure FROM_EMAIL in Render is set to your Brevo account email.',
             configUsed,
             apiError: errData,
             smtpError: smtpErr.message
@@ -187,10 +216,9 @@ app.post('/api/verify-smtp', async (req, res) => {
     }
 
     // If using Resend API Key over HTTPS (Port 443 - 100% open on Render)
-    if (configUsed.hasResendKey) {
-      const apiKey = process.env.RESEND_API_KEY || process.env.SMTP_PASS;
+    if (resendKey) {
       const apiRes = await fetch('https://api.resend.com/domains', {
-        headers: { 'Authorization': `Bearer ${apiKey}` }
+        headers: { 'Authorization': `Bearer ${resendKey}` }
       });
       if (apiRes.ok || apiRes.status === 401 || apiRes.status === 200) {
         return res.status(200).json({
@@ -237,27 +265,68 @@ app.post('/api/send-email', async (req, res) => {
     return res.status(400).json({ success: false, message: 'Recipient email ("to") is required.' });
   }
 
+  const brevoKey = (process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.SMTP_PASS || '').trim();
+  const resendKey = (process.env.RESEND_API_KEY || '').trim();
+  const senderEmail = (process.env.FROM_EMAIL || process.env.SMTP_USER || '').trim();
+
   const configUsed = {
     host: process.env.SMTP_HOST || 'smtp.gmail.com (default)',
     port: process.env.SMTP_PORT || '465 (default)',
-    user: process.env.SMTP_USER || 'Not set',
-    service: process.env.SMTP_SERVICE || 'Not set',
-    hasResendKey: !!(process.env.RESEND_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('re_'))),
-    hasBrevoKey: !!(process.env.BREVO_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('xkeysib-')))
+    user: senderEmail || 'Not set',
+    hasResendKey: !!resendKey,
+    hasBrevoKey: !!brevoKey,
+    keyPrefix: brevoKey ? brevoKey.substring(0, 8) : 'none'
   };
 
-  // Method A1: Brevo HTTPS API Delivery (300 free emails/day to ANY recipient without domain verification!)
-  if (configUsed.hasBrevoKey) {
-    try {
-      const apiKey = (process.env.BREVO_API_KEY || process.env.BRAVO_API_KEY || process.env.SMTP_PASS).trim();
-      const senderEmail = (process.env.FROM_EMAIL || process.env.SMTP_USER || '').trim();
+  // Method A1: Brevo Key Delivery (Supports both xsmtpsib- SMTP Keys and xkeysib- API Keys)
+  if (brevoKey) {
+    // If it's an SMTP Relay Key (starts with xsmtpsib-), send via Nodemailer
+    if (brevoKey.startsWith('xsmtpsib-')) {
+      try {
+        console.log(`[Brevo Nodemailer SMTP Send] To: ${to} | From: ${senderEmail}`);
+        const transporter = nodemailer.createTransport({
+          host: 'smtp-relay.brevo.com',
+          port: 587,
+          secure: false,
+          auth: {
+            user: senderEmail,
+            pass: brevoKey
+          },
+          tls: { rejectUnauthorized: false }
+        });
 
+        const info = await transporter.sendMail({
+          from: senderEmail,
+          to: to,
+          subject: subject || 'Test Email from MERN Debugger',
+          text: text || 'This is a test email sent via Brevo SMTP Relay on Render.',
+          html: html || `<div style="font-family: Arial; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
+            <h2 style="color: #4F46E5;">Email Delivery Success! 🎉</h2>
+            <p>Your mailer is working on Render via Brevo SMTP Relay!</p>
+            <hr style="border: 0; border-top: 1px solid #eee;" />
+            <p style="font-size: 12px; color: #666;">Sent at: ${new Date().toLocaleString()}</p>
+          </div>`
+        });
+
+        return res.status(200).json({
+          success: true,
+          message: 'Email sent successfully via Nodemailer + Brevo SMTP Relay on Render!',
+          messageId: info.messageId,
+          configUsed
+        });
+      } catch (smtpErr) {
+        console.error('[Brevo Nodemailer SMTP Error]:', smtpErr);
+      }
+    }
+
+    // Try HTTPS API delivery (xkeysib-)
+    try {
       console.log(`[Brevo HTTPS Send] To: ${to} | From: ${senderEmail}`);
       const response = await fetch('https://api.brevo.com/v3/smtp/email', {
         method: 'POST',
         headers: {
           'accept': 'application/json',
-          'api-key': apiKey,
+          'api-key': brevoKey,
           'content-type': 'application/json'
         },
         body: JSON.stringify({
@@ -285,12 +354,48 @@ app.post('/api/send-email', async (req, res) => {
           brevoResponse: data
         });
       } else {
-        return res.status(response.status).json({
-          success: false,
-          message: 'Brevo API returned an error.',
-          configUsed,
-          error: data
-        });
+        // Fallback: If HTTP API fails, send via Nodemailer + Brevo SMTP Relay
+        try {
+          console.log(`[Brevo Nodemailer Fallback Send] To: ${to} | From: ${senderEmail}`);
+          const transporter = nodemailer.createTransport({
+            host: 'smtp-relay.brevo.com',
+            port: 587,
+            secure: false,
+            auth: {
+              user: senderEmail,
+              pass: brevoKey
+            },
+            tls: { rejectUnauthorized: false }
+          });
+
+          const info = await transporter.sendMail({
+            from: senderEmail,
+            to: to,
+            subject: subject || 'Test Email from MERN Debugger',
+            text: text || 'This is a test email sent via Brevo SMTP Relay on Render.',
+            html: html || `<div style="font-family: Arial; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
+              <h2 style="color: #4F46E5;">Email Delivery Success! 🎉</h2>
+              <p>Your mailer is working on Render via Brevo SMTP Relay!</p>
+              <hr style="border: 0; border-top: 1px solid #eee;" />
+              <p style="font-size: 12px; color: #666;">Sent at: ${new Date().toLocaleString()}</p>
+            </div>`
+          });
+
+          return res.status(200).json({
+            success: true,
+            message: 'Email sent successfully via Nodemailer + Brevo SMTP Relay on Render!',
+            messageId: info.messageId,
+            configUsed
+          });
+        } catch (fallbackErr) {
+          return res.status(response.status).json({
+            success: false,
+            message: 'Brevo API and SMTP Relay returned an error.',
+            configUsed,
+            error: data,
+            smtpError: fallbackErr.message
+          });
+        }
       }
     } catch (err) {
       console.error('[Brevo HTTPS Error]:', err);
