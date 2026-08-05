@@ -180,10 +180,61 @@ app.post('/api/send-email', async (req, res) => {
     port: process.env.SMTP_PORT || '465 (default)',
     user: process.env.SMTP_USER || 'Not set',
     service: process.env.SMTP_SERVICE || 'Not set',
-    hasResendKey: !!(process.env.RESEND_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('re_')))
+    hasResendKey: !!(process.env.RESEND_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('re_'))),
+    hasBrevoKey: !!(process.env.BREVO_API_KEY || (process.env.SMTP_PASS && process.env.SMTP_PASS.startsWith('xkeysib-')))
   };
 
-  // Method A: HTTPS Resend Delivery (Uses Port 443 - Bypasses Render TCP Port Blocks)
+  // Method A1: Brevo HTTPS API Delivery (300 free emails/day to ANY recipient without domain verification!)
+  if (configUsed.hasBrevoKey) {
+    try {
+      const apiKey = process.env.BREVO_API_KEY || process.env.SMTP_PASS;
+      const senderEmail = process.env.FROM_EMAIL || process.env.SMTP_USER;
+
+      console.log(`[Brevo HTTPS Send] To: ${to} | From: ${senderEmail}`);
+      const response = await fetch('https://api.brevo.com/v3/smtp/email', {
+        method: 'POST',
+        headers: {
+          'api-key': apiKey,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          sender: { name: 'MERN Mailer Tester', email: senderEmail },
+          to: [{ email: to }],
+          subject: subject || 'Test Email from MERN Debugger',
+          textContent: text || 'This is a test email sent via Brevo HTTPS on Render.',
+          htmlContent: html || `<div style="font-family: Arial; padding: 20px; border: 1px solid #ddd; border-radius: 8px;">
+            <h2 style="color: #4F46E5;">Email Delivery Success! 🎉</h2>
+            <p>Your mailer is working on Render to ANY recipient email!</p>
+            <hr style="border: 0; border-top: 1px solid #eee;" />
+            <p style="font-size: 12px; color: #666;">Sent at: ${new Date().toLocaleString()}</p>
+          </div>`
+        })
+      });
+
+      const data = await response.json();
+
+      if (response.ok) {
+        return res.status(200).json({
+          success: true,
+          message: 'Email sent successfully to ANY recipient via Brevo API on Render!',
+          messageId: data.messageId,
+          configUsed,
+          brevoResponse: data
+        });
+      } else {
+        return res.status(response.status).json({
+          success: false,
+          message: 'Brevo API returned an error.',
+          configUsed,
+          error: data
+        });
+      }
+    } catch (err) {
+      console.error('[Brevo HTTPS Error]:', err);
+    }
+  }
+
+  // Method A2: HTTPS Resend Delivery (Uses Port 443 - Bypasses Render TCP Port Blocks)
   if (configUsed.hasResendKey) {
     try {
       const apiKey = process.env.RESEND_API_KEY || process.env.SMTP_PASS;
